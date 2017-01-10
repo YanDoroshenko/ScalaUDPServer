@@ -127,7 +127,17 @@ object Robot {
         println("Got packet " + packet.seqInt)
         if (packet.flag == 1)
           terminate
-        if (packet.seqInt == toDownloadSeq) {
+        else if (inPacket.getLength != 264) {
+          println("End detected")
+          val data = inPacket.getData.drop(9)
+          val packet = new Packet(inPacket.getData)
+          val seqInt = packet.seqInt + inPacket.getLength - 8
+          fos.write(data)
+          packet.conf = Array(seqInt / 256, seqInt % 256).map(_.toByte)
+          val confirmation = new DatagramPacket(Robot.id ++ packet.seq ++ packet.conf ++ Array(2.toByte), 9, address, 4000)
+          socket.send(confirmation)
+        }
+        else if (packet.seqInt == toDownloadSeq) {
           println("Writing packet " + packet.seqInt + "(" + count + ")")
           fos.write(packet.data)
           count += 255
@@ -140,14 +150,8 @@ object Robot {
             toDownloadSeq += 255
           }
           println(toDownloadSeq + "(" + toDownloadSeq / 256 + "," + toDownloadSeq % 256 + ") is now needed")
-          if (toDownloadSeq != 25242) {
-            packet.conf = Array(toDownloadSeq / 256, toDownloadSeq % 256).map(_.toByte)
-            println("Sending confirmation " + ((packet.conf(0).toInt & 0xff) * 256 + (packet.conf(1).toInt & 0xff)))
-          }
-          else {
-            packet.conf = Array(24987 / 256, 24987 % 256).map(_.toByte)
-            println("Sending confirmation " + ((packet.conf(0).toInt & 0xff) * 256 + (packet.conf(1).toInt & 0xff)))
-          }
+          packet.conf = Array(toDownloadSeq / 256, toDownloadSeq % 256).map(_.toByte)
+          println("Sending confirmation " + ((packet.conf(0).toInt & 0xff) * 256 + (packet.conf(1).toInt & 0xff)))
           val confirmation = new DatagramPacket(packet.getFrame, packet.getFrame.length, address, 4000)
           socket.send(confirmation)
 
