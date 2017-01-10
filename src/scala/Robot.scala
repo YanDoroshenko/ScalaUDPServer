@@ -3,6 +3,8 @@ package scala
 import java.io.{FileInputStream, FileOutputStream}
 import java.net.{DatagramPacket, DatagramSocket, InetAddress}
 
+import scala.collection.mutable.ListBuffer
+
 /**
   * Created by Yan Doroshenko (yandoroshenko@protonmail.com) on 31.12.16.
   */
@@ -10,8 +12,24 @@ object Robot {
 
   val socket = new DatagramSocket(4545)
   var id: Array[Byte] = _
-  val address = InetAddress.getByAddress(Array(192, 168, 56, 101).map(_.toByte))
+  val address = InetAddress.getByAddress(Array(127, 0, 0, 1).map(_.toByte))
   var length: Int = 10
+  var toDownloadSeq = 0
+  var count = 0
+
+  val buffer: ListBuffer[Packet] = ListBuffer()
+
+  class Packet(private val frame: Array[Byte]) {
+    val id = frame take 4
+    val seq = frame slice(4, 6)
+    var conf = frame slice(6, 8)
+    val flag = frame(8)
+    val data = frame drop 9
+
+    def getFrame = id ++ seq ++ conf ++ Array(flag)
+
+    def seqInt = (seq(0).toInt & 0xff) * 256 + (seq(1).toInt & 0xff)
+  }
 
   def handshake = {
     println("Handshake")
@@ -32,11 +50,13 @@ object Robot {
     confirmation = Array(response(6), response(7))
     flag = response(8)
     data = response.drop(9)
+    println("-------HANDSHAKE-------")
     println(id.mkString("id: [", ",", "]"))
     println(seq.mkString("seq: [", ",", "]"))
     println(confirmation.mkString("conf: [", ",", "]"))
     println("flag: " + flag)
     println(data.mkString("data" + data.length + ": [", ",", "]"))
+    println("-------HANDSHAKE-------")
     Robot.id = id
     checkHandshake(id, seq, confirmation, flag, data)
   }
@@ -66,7 +86,7 @@ object Robot {
   }
 
   def terminate = {
-    println("Closing connection")
+    println("Terminating connection")
     val id = Robot.id
     val seq = Array[Byte](0, 0)
     val confirmation = Array[Byte](0, 0)
@@ -99,32 +119,53 @@ object Robot {
       var data: Array[Byte] = Array.fill(255)(0)
       val packetData = id ++ seq ++ confirmation ++ Array(flag) ++ data
       val inPacket = new DatagramPacket(packetData, packetData.length)
-      socket.receive(inPacket)
-      val response = inPacket.getData.map(_ & 0xff).map(_.toByte)
-      id = response.take(4)
-      seq = Array(response(4), response(5))
-      confirmation = Array(response(6), response(7))
-      flag = response(8)
-      data = response.drop(9)
-      println(id.mkString("id: [", ",", "]"))
-      println(seq.mkString("seq: [", ",", "]"))
-      println(confirmation.mkString("conf: [", ",", "]"))
-      println("flag: " + flag)
-      println(data.mkString("data (" + data.length + "): [", ",", "]"))
-      if (!data.forall(_ == 0)) {
-        fos.write(data)
-        id = Robot.id
-        seq = Array(0, 255).map(_.toByte)
-        confirmation = Array(1, 255).map(_.toByte)
-        flag = 0
-        data = Array(0).map(_.toByte)
-        val confirm = id ++ seq ++ confirmation ++ Array(flag) ++ data
-        val outPacket = new DatagramPacket(confirm, confirm.length, address, 4000)
+      while (inPacket.getData()(8) != 2 && !socket.isClosed) {
+        if (toDownloadSeq > 65536)
+          toDownloadSeq -= 65536
+        socket.receive(inPacket)
+        val packet = new Packet(inPacket.getData)
+        println("Got packet " + packet.seqInt)
+        if (packet.flag == 1)
+          terminate
+        if (packet.seqInt == toDownloadSeq) {
+          println("Writing packet " + packet.seqInt + "(" + count + ")")
+          fos.write(packet.data)
+          count += 255
+          toDownloadSeq += 255
+          while (buffer.exists(_.seqInt == toDownloadSeq)) {
+            val next = buffer.filter(_.seqInt == toDownloadSeq).head
+            println("Writing packet " + next.seqInt + "(" + count + ") from buffer")
+            fos.write(next.data)
+            count += 255
+            toDownloadSeq += 255
+          }
+          println(toDownloadSeq + "(" + toDownloadSeq / 256 + "," + toDownloadSeq % 256 + ") is now needed")
+          if (toDownloadSeq != 25242) {
+            packet.conf = Array(toDownloadSeq / 256, toDownloadSeq % 256).map(_.toByte)
+            println("Sending confirmation " + ((packet.conf(0).toInt & 0xff) * 256 + (packet.conf(1).toInt & 0xff)))
+          }
+          else {
+            packet.conf = Array(24987 / 256, 24987 % 256).map(_.toByte)
+            println("Sending confirmation " + ((packet.conf(0).toInt & 0xff) * 256 + (packet.conf(1).toInt & 0xff)))
+          }
+          val confirmation = new DatagramPacket(packet.getFrame, packet.getFrame.length, address, 4000)
+          socket.send(confirmation)
+
+        }
+        else if (packet.seqInt > toDownloadSeq && !buffer.exists(_.seqInt == toDownloadSeq)) {
+          println("Adding packet with seq " + packet.seqInt + " to buffer, " + toDownloadSeq + " needed")
+          buffer += packet
+          packet.conf = Array(toDownloadSeq / 256, toDownloadSeq % 256).map(_.toByte)
+          val confirmation = new DatagramPacket(packet.getFrame, packet.getFrame.length, address, 4000)
+          socket.send(confirmation)
+        }
+        else if (toDownloadSeq - packet.seqInt == 2040) {
+          packet.conf = Array(toDownloadSeq / 256, toDownloadSeq % 256).map(_.toByte)
+          println("Sending confirmation " + ((packet.conf(0).toInt & 0xff) * 256 + (packet.conf(1).toInt & 0xff)) + " AGAIN")
+          val confirmation = new DatagramPacket(packet.getFrame, packet.getFrame.length, address, 4000)
+          socket.send(confirmation)
+        }
       }
-      if (flag == 1)
-        terminate
-      if (flag == 2)
-        socket.close()
     }
     fos.close()
   }
@@ -134,6 +175,5 @@ object Robot {
     send*/
     handshake
     receive
-    terminate
   }
 }
