@@ -13,11 +13,12 @@ object Robot {
   val socket = new DatagramSocket(4545)
   var id: Array[Byte] = _
   val address = InetAddress.getByAddress(Array(127, 0, 0, 1).map(_.toByte))
+  val arr = ListBuffer[Int]()
   var length: Int = 10
   var toDownloadSeq = 0
   var count = 0
 
-  val buffer: ListBuffer[Packet] = ListBuffer()
+  val buffer: collection.mutable.Map[Int, Packet] = collection.mutable.Map[Int, Packet]()
 
   class Packet(private val frame: Array[Byte]) {
     val id = frame take 4
@@ -110,7 +111,7 @@ object Robot {
   }
 
   def receive = {
-    val fos = new FileOutputStream("image.png")
+    val fos = new FileOutputStream("small.png")
     while (!socket.isClosed) {
       var id = Array[Byte](0, 0, 0, 0)
       var seq = Array[Byte](0, 0)
@@ -119,7 +120,7 @@ object Robot {
       var data: Array[Byte] = Array.fill(255)(0)
       val packetData = id ++ seq ++ confirmation ++ Array(flag) ++ data
       val inPacket = new DatagramPacket(packetData, packetData.length)
-      while (inPacket.getData()(8) != 2 && !socket.isClosed) {
+      while (!socket.isClosed) {
         if (toDownloadSeq > 65536)
           toDownloadSeq -= 65536
         socket.receive(inPacket)
@@ -127,27 +128,44 @@ object Robot {
         println("Got packet " + packet.seqInt)
         if (packet.flag == 1)
           terminate
+        else if (packet.flag == 2) {
+          val fin = new DatagramPacket(Robot.id ++ Array(0, 0).map(_.toByte) ++ packet.seq ++ Array(2.toByte), 9, address, 4000)
+          socket.send(fin)
+          socket.close()
+        }
         else if (inPacket.getLength != 264) {
           println("End detected")
           val data = inPacket.getData.drop(9)
-          val packet = new Packet(inPacket.getData)
-          val seqInt = packet.seqInt + inPacket.getLength - 8
-          fos.write(data)
+          val seqInt = packet.seqInt + inPacket.getLength - 9
+          if (!arr.contains(seqInt)) {
+            fos.write(data take (inPacket.getLength - 9))
+            arr += packet.seqInt
+            fos.flush()
+          }
           packet.conf = Array(seqInt / 256, seqInt % 256).map(_.toByte)
-          val confirmation = new DatagramPacket(Robot.id ++ packet.seq ++ packet.conf ++ Array(2.toByte), 9, address, 4000)
+          val confirmation = new DatagramPacket(Robot.id ++ packet.seq ++ packet.conf ++ Array(0.toByte), 9, address, 4000)
           socket.send(confirmation)
         }
         else if (packet.seqInt == toDownloadSeq) {
           println("Writing packet " + packet.seqInt + "(" + count + ")")
-          fos.write(packet.data)
+          if (!arr.contains(packet.seqInt)) {
+            fos.write(packet.data)
+            arr += packet.seqInt
+            fos.flush()
+          }
           count += 255
           toDownloadSeq += 255
-          while (buffer.exists(_.seqInt == toDownloadSeq)) {
-            val next = buffer.filter(_.seqInt == toDownloadSeq).head
+          while (buffer.contains(toDownloadSeq)) {
+            val next = buffer(toDownloadSeq)
             println("Writing packet " + next.seqInt + "(" + count + ") from buffer")
-            fos.write(next.data)
+            if (!arr.contains(next.seqInt)) {
+              fos.write(next.data)
+              arr += next.seqInt
+              fos.flush()
+            }
             count += 255
             toDownloadSeq += 255
+            buffer -= next.seqInt
           }
           println(toDownloadSeq + "(" + toDownloadSeq / 256 + "," + toDownloadSeq % 256 + ") is now needed")
           packet.conf = Array(toDownloadSeq / 256, toDownloadSeq % 256).map(_.toByte)
@@ -156,9 +174,9 @@ object Robot {
           socket.send(confirmation)
 
         }
-        else if (packet.seqInt > toDownloadSeq && !buffer.exists(_.seqInt == toDownloadSeq)) {
+        else if (packet.seqInt > toDownloadSeq && !buffer.contains(toDownloadSeq)) {
           println("Adding packet with seq " + packet.seqInt + " to buffer, " + toDownloadSeq + " needed")
-          buffer += packet
+          buffer += (packet.seqInt -> packet)
           packet.conf = Array(toDownloadSeq / 256, toDownloadSeq % 256).map(_.toByte)
           val confirmation = new DatagramPacket(packet.getFrame, packet.getFrame.length, address, 4000)
           socket.send(confirmation)
@@ -171,7 +189,10 @@ object Robot {
         }
       }
     }
+    println("Closing file stream")
     fos.close()
+    println(arr.mkString("Written to file: [", ",", "]"))
+    println("Connection id was " + Robot.id.mkString("[", ",", "]"))
   }
 
   def main(args: Array[String]): Unit = {
